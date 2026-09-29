@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Surface & Base Colors */
+  --color-void: #06080e;
+  --color-surface: #0b0f19;
+  --color-panel: #111827;
+  --color-panel-elevated: #162032;
+
+  /* Borders */
+  --border-subtle: #1f2937;
+  --border-active: #374151;
+  --border-accent: #06b6d4;
+
+  /* Tactical Signals */
+  --signal-crimson: #ef4444;
+  --signal-amber: #f59e0b;
+  --signal-emerald: #10b981;
+  --signal-cyan: #06b6d4;
+  --signal-indigo: #6366f1;
+
+  /* Text Contrast Hierarchy */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-mono-cyan: #67e8f9;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+body {
+  background-color: var(--color-void);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+  user-select: none;
+}
+
+/* Monospace Telemetry Utilities */
+.telemetry-text {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' on, 'zero' on;
+}
+
+/* Tactical Glassmorphism Classes */
+.glass-panel {
+  background: #111827d1;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+}
+
+.glass-panel-elevated {
+  background: #162032eb;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid #06b6d440;
+  box-shadow: 0 10px 25px -5px #000000cc, 0 0 15px #06b6d426;
+}
+
+/* Custom Tactical Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-void);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-active);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--signal-cyan);
+}

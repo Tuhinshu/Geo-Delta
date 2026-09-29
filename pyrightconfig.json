@@ -1,0 +1,23 @@
+{
+  "include": [
+    "backend",
+    "enterprise"
+  ],
+  "exclude": [
+    "**/*.txt",
+    "**/*.cfg",
+    "**/*.ini",
+    "**/*.toml",
+    "**/node_modules"
+  ],
+  "extraPaths": [
+    ".",
+    "backend",
+    "backend/app",
+    "enterprise",
+    ".venv/Lib/site-packages"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingTypeStubs": false
+}

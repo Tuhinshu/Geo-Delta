@@ -1,0 +1,55 @@
+# ==============================================================================
+# GeoDelta Backend Dependencies
+# Problem Statement: SIH26227 (Ministry of Defence, Government of India)
+# Python 3.14 compatible — all packages must have prebuilt cp314 wheels
+# ==============================================================================
+
+# Core ASGI & Gateway
+fastapi>=0.114.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.10.0               # pydantic-core>=2.27.0 ships cp314 wheels
+pydantic-settings>=2.6.0
+python-multipart>=0.0.9
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Task Queue & In-Memory Broker
+celery>=5.4.0
+redis>=5.0.3
+
+# Database & Spatial Engine
+SQLAlchemy>=2.0.36
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+GeoAlchemy2>=0.14.6
+shapely>=2.0.3
+geopandas>=1.0.0
+
+# Geospatial Processing & Raster I/O
+rasterio>=1.3.9
+pyproj>=3.6.1
+affine>=2.4.0
+mgrs>=1.4.5
+
+# Computer Vision & Deep Learning
+# Note: torch and torchvision with CUDA 12.1 are installed via Dockerfile index-url
+transformers>=4.38.2
+accelerate>=0.28.0
+opencv-python-headless>=4.9.0.80
+numpy>=1.26.4
+pillow>=10.2.0
+scipy>=1.12.0
+
+# Object Storage & HTTP Streaming
+boto3>=1.34.69
+httpx>=0.27.0
+aiofiles>=23.2.1
+
+# Intelligence Dossier & Reporting
+reportlab>=4.1.0
+PyMuPDF>=1.23.26
+
+# Testing & Quality Assurance
+pytest>=8.1.1
+pytest-asyncio>=0.23.5
+httpx>=0.27.0
