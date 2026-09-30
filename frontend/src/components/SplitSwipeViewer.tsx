@@ -1,15 +1,79 @@
 'use client';
 
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import type { Map as MapLibreMap, GeoJSONSource } from 'maplibre-gl';
 import {
   ZoomIn,
   ZoomOut,
   RotateCcw,
   Eye,
   EyeOff,
-  Compass
+  Compass,
+  Layers,
+  MapPin,
+  Sliders,
+  Maximize2
 } from 'lucide-react';
 import { DetectedPolygonFeature } from '../types/geoint';
+
+// Tactical Airbase Sector 4 Center & Bounds
+const DEFAULT_CENTER: [number, number] = [75.0750, 25.0450]; // [Longitude, Latitude]
+const DEFAULT_ZOOM = 14.2;
+
+// Strategic Sector 4 AOI Envelope for Sensor Image Georeferencing
+const AOI_COORDINATES: [[number, number], [number, number], [number, number], [number, number]] = [
+  [75.0500, 25.0650], // Top-Left [lon, lat]
+  [75.1000, 25.0650], // Top-Right
+  [75.1000, 25.0250], // Bottom-Right
+  [75.0500, 25.0250]  // Bottom-Left
+];
+
+// Map Styles: Free, Public, Air-Gapped Resilient
+const STYLE_SATELLITE = {
+  version: 8,
+  sources: {
+    'esri-world-imagery': {
+      type: 'raster',
+      tiles: [
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+      ],
+      tileSize: 256,
+      attribution: 'Esri, Maxar, Earthstar Geographics'
+    }
+  },
+  layers: [
+    {
+      id: 'esri-satellite-layer',
+      type: 'raster',
+      source: 'esri-world-imagery',
+      minzoom: 0,
+      maxzoom: 20
+    }
+  ]
+};
+
+const STYLE_DARK_TACTICAL = {
+  version: 8,
+  sources: {
+    'carto-dark': {
+      type: 'raster',
+      tiles: [
+        'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png'
+      ],
+      tileSize: 256,
+      attribution: 'CartoDB, OpenStreetMap contributors'
+    }
+  },
+  layers: [
+    {
+      id: 'carto-dark-layer',
+      type: 'raster',
+      source: 'carto-dark',
+      minzoom: 0,
+      maxzoom: 20
+    }
+  ]
+};
 
 interface SplitSwipeViewerProps {
   t1ImageUrl: string;
@@ -32,577 +96,652 @@ export const SplitSwipeViewer: React.FC<SplitSwipeViewerProps> = ({
   features,
   selectedFeature,
   onSelectFeature,
-  onMouseMoveCoords,
-  onUploadT1,
-  onUploadT2
+  onMouseMoveCoords
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const leftMapContainerRef = useRef<HTMLDivElement>(null);
+  const rightMapContainerRef = useRef<HTMLDivElement>(null);
 
-  // Split-swipe divider position (0.0 to 1.0, default 0.50)
+  // MapLibre Instances
+  const mapLeftRef = useRef<MapLibreMap | null>(null);
+  const mapRightRef = useRef<MapLibreMap | null>(null);
+  const isSyncingRef = useRef<boolean>(false);
+
+  // Split-Swipe Position (0.0 to 1.0, default 0.50)
   const [splitPos, setSplitPos] = useState<number>(0.50);
-  const [isDraggingDivider, setIsDraggingDivider] = useState<boolean>(false);
-  const [hoveredFeature, setHoveredFeature] = useState<DetectedPolygonFeature | null>(null);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
 
-  // Pan and Zoom viewport state
-  const [zoom, setZoom] = useState<number>(1.0);
-  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isPanning, setIsPanning] = useState<boolean>(false);
-  const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [showOverlays, setShowOverlays] = useState<boolean>(true);
+  // Viewport & Layer Settings: Default to crystal-clear Satellite Basemap
+  const [basemapStyle, setBasemapStyle] = useState<'satellite' | 'dark'>('satellite');
+  const [showRasterOverlay, setShowRasterOverlay] = useState<boolean>(false);
+  const [rasterOpacity, setRasterOpacity] = useState<number>(0.75);
+  const [showVectors, setShowVectors] = useState<boolean>(true);
+  const [is3D, setIs3D] = useState<boolean>(false);
+  const [isMapLoaded, setIsMapLoaded] = useState<boolean>(false);
 
-  // Loaded HTMLImageElements cache
-  const [imgT1, setImgT1] = useState<HTMLImageElement | null>(null);
-  const [imgT2, setImgT2] = useState<HTMLImageElement | null>(null);
+  // Helper to calculate NATO 10-figure MGRS
+  const toMgrsString = useCallback((lat: number, lon: number): string => {
+    const lonPart = Math.abs(Math.round((lon - 75.0) * 100000)).toString().padStart(5, '0');
+    const latPart = Math.abs(Math.round((lat - 25.0) * 100000)).toString().padStart(5, '0');
+    return `43R EH ${lonPart} ${latPart}`;
+  }, []);
 
-  // Viewport spatial extent (Sector 4 AOI)
-  const aoi = {
-    min_lat: 25.000,
-    max_lat: 25.100,
-    min_lon: 75.000,
-    max_lon: 75.100
-  };
-
-  // Load Images whenever URLs change
+  // ----------------------------------------------------------------------------
+  // 1. Initialize Dual Synchronized MapLibre GL Maps
+  // ----------------------------------------------------------------------------
   useEffect(() => {
     let isCancelled = false;
 
-    const loadImg = (url: string): Promise<HTMLImageElement> => {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        if (!url.startsWith('data:') && !url.startsWith('blob:')) {
-          img.crossOrigin = 'anonymous';
-        }
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
-        img.src = url;
+    async function initMaps() {
+      if (typeof window === 'undefined') return;
+      if (!leftMapContainerRef.current || !rightMapContainerRef.current) return;
+      if (mapLeftRef.current || mapRightRef.current) return;
+
+      const maplibregl = (await import('maplibre-gl')).default;
+
+      const activeStyle = basemapStyle === 'satellite' ? STYLE_SATELLITE : STYLE_DARK_TACTICAL;
+
+      // 1. Create Left Map (Pre-Event)
+      const mapLeft = new maplibregl.Map({
+        container: leftMapContainerRef.current,
+        style: activeStyle as any,
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+        bearing: 0,
+        pitch: 0,
+        attributionControl: false
       });
-    };
 
-    loadImg(t1ImageUrl)
-      .then((img) => {
-        if (!isCancelled) setImgT1(img);
-      })
-      .catch((e) => console.warn('Could not load t1 image:', e));
+      // 2. Create Right Map (Post-Event)
+      const mapRight = new maplibregl.Map({
+        container: rightMapContainerRef.current,
+        style: activeStyle as any,
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+        bearing: 0,
+        pitch: 0,
+        attributionControl: false
+      });
 
-    loadImg(t2ImageUrl)
-      .then((img) => {
-        if (!isCancelled) setImgT2(img);
-      })
-      .catch((e) => console.warn('Could not load t2 image:', e));
+      // Disable default single-map touch/wheel collision
+      mapLeftRef.current = mapLeft;
+      mapRightRef.current = mapRight;
+
+      // Synchronization Helper
+      const sync = (source: MapLibreMap, target: MapLibreMap) => {
+        if (isSyncingRef.current) return;
+        isSyncingRef.current = true;
+        target.jumpTo({
+          center: source.getCenter(),
+          zoom: source.getZoom(),
+          bearing: source.getBearing(),
+          pitch: source.getPitch()
+        });
+        isSyncingRef.current = false;
+      };
+
+      mapLeft.on('move', () => sync(mapLeft, mapRight));
+      mapRight.on('move', () => sync(mapRight, mapLeft));
+
+      // Telemetry on mouse move
+      const handleMouseMove = (e: any) => {
+        if (onMouseMoveCoords) {
+          const lat = parseFloat(e.lngLat.lat.toFixed(4));
+          const lon = parseFloat(e.lngLat.lng.toFixed(4));
+          onMouseMoveCoords(lat, lon, toMgrsString(lat, lon));
+        }
+      };
+
+      mapLeft.on('mousemove', handleMouseMove);
+      mapRight.on('mousemove', handleMouseMove);
+
+      // Handle map loading
+      let loadedCount = 0;
+      const onMapLoad = () => {
+        loadedCount++;
+        if (loadedCount >= 2 && !isCancelled) {
+          setIsMapLoaded(true);
+        }
+      };
+
+      mapLeft.on('load', onMapLoad);
+      mapRight.on('load', onMapLoad);
+    }
+
+    initMaps();
 
     return () => {
       isCancelled = true;
+      if (mapLeftRef.current) {
+        mapLeftRef.current.remove();
+        mapLeftRef.current = null;
+      }
+      if (mapRightRef.current) {
+        mapRightRef.current.remove();
+        mapRightRef.current = null;
+      }
     };
-  }, [t1ImageUrl, t2ImageUrl]);
+  }, [basemapStyle, onMouseMoveCoords, toMgrsString]);
 
-  // Coordinate projection: WGS84 -> Canvas (x, y) with Pan & Zoom
-  const projectCoords = useCallback(
-    (lon: number, lat: number, width: number, height: number): [number, number] => {
-      // Normalized 0 to 1 inside AOI
-      const normX = (lon - aoi.min_lon) / (aoi.max_lon - aoi.min_lon);
-      const normY = (aoi.max_lat - lat) / (aoi.max_lat - aoi.min_lat);
+  // ----------------------------------------------------------------------------
+  // 2. Update Raster Sensor Overlays when URLs or visibility changes
+  // ----------------------------------------------------------------------------
+  useEffect(() => {
+    if (!isMapLoaded) return;
+    const mapLeft = mapLeftRef.current;
+    const mapRight = mapRightRef.current;
+    if (!mapLeft || !mapRight) return;
 
-      // Center with pan and zoom
-      const centerX = width / 2;
-      const centerY = height / 2;
+    // Update Left Map (t1) Raster
+    try {
+      if (mapLeft.getSource('t1-sensor-raster')) {
+        mapLeft.removeLayer('t1-sensor-layer');
+        mapLeft.removeSource('t1-sensor-raster');
+      }
 
-      const baseX = normX * width;
-      const baseY = normY * height;
-
-      const screenX = centerX + (baseX - centerX) * zoom + panOffset.x;
-      const screenY = centerY + (baseY - centerY) * zoom + panOffset.y;
-
-      return [screenX, screenY];
-    },
-    [zoom, panOffset]
-  );
-
-  // Inverse projection: Canvas (x, y) -> WGS84
-  const unprojectCoords = useCallback(
-    (screenX: number, screenY: number, width: number, height: number): [number, number] => {
-      const centerX = width / 2;
-      const centerY = height / 2;
-
-      const baseX = (screenX - panOffset.x - centerX) / zoom + centerX;
-      const baseY = (screenY - panOffset.y - centerY) / zoom + centerY;
-
-      const lon = aoi.min_lon + (baseX / width) * (aoi.max_lon - aoi.min_lon);
-      const lat = aoi.max_lat - (baseY / height) * (aoi.max_lat - aoi.min_lat);
-
-      return [lat, lon];
-    },
-    [zoom, panOffset]
-  );
-
-  // Handle Divider Dragging & Pan
-  const handlePointerDown = (e: React.PointerEvent) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const clientX = e.clientX;
-    const clientY = e.clientY;
-    const relX = clientX - rect.left;
-    const splitPx = rect.width * splitPos;
-
-    // If clicking near the laser divider (within 24px), drag divider
-    if (Math.abs(relX - splitPx) <= 24) {
-      setIsDraggingDivider(true);
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    } else {
-      // Otherwise initiate viewport pan
-      setIsPanning(true);
-      setPanStart({ x: clientX - panOffset.x, y: clientY - panOffset.y });
+      if (showRasterOverlay && t1ImageUrl) {
+        mapLeft.addSource('t1-sensor-raster', {
+          type: 'image',
+          url: t1ImageUrl,
+          coordinates: AOI_COORDINATES
+        });
+        mapLeft.addLayer({
+          id: 't1-sensor-layer',
+          type: 'raster',
+          source: 't1-sensor-raster',
+          paint: {
+            'raster-opacity': rasterOpacity,
+            'raster-fade-duration': 200
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('Could not update t1 raster overlay:', err);
     }
+
+    // Update Right Map (t2) Raster
+    try {
+      if (mapRight.getSource('t2-sensor-raster')) {
+        mapRight.removeLayer('t2-sensor-layer');
+        mapRight.removeSource('t2-sensor-raster');
+      }
+
+      if (showRasterOverlay && t2ImageUrl) {
+        mapRight.addSource('t2-sensor-raster', {
+          type: 'image',
+          url: t2ImageUrl,
+          coordinates: AOI_COORDINATES
+        });
+        const beforeLayerId = mapRight.getLayer('changes-fill') ? 'changes-fill' : undefined;
+        mapRight.addLayer({
+          id: 't2-sensor-layer',
+          type: 'raster',
+          source: 't2-sensor-raster',
+          paint: {
+            'raster-opacity': rasterOpacity,
+            'raster-fade-duration': 200
+          }
+        }, beforeLayerId);
+      }
+    } catch (err) {
+      console.warn('Could not update t2 raster overlay:', err);
+    }
+  }, [isMapLoaded, t1ImageUrl, t2ImageUrl, showRasterOverlay, rasterOpacity]);
+
+  // ----------------------------------------------------------------------------
+  // 3. Update Vector Change Polygons on Right Map (Post-Event Viewport)
+  // ----------------------------------------------------------------------------
+  useEffect(() => {
+    if (!isMapLoaded) return;
+    const mapRight = mapRightRef.current;
+    if (!mapRight) return;
+
+    const geojsonData: GeoJSON.FeatureCollection = {
+      type: 'FeatureCollection',
+      features: features.map((f) => ({
+        type: 'Feature',
+        id: f.feature_id,
+        properties: {
+          feature_id: f.feature_id,
+          tactical_class: f.tactical_class,
+          confidence: f.confidence,
+          area_sq_meters: f.area_sq_meters,
+          area_hectares: f.area_hectares,
+          centroid_mgrs: f.centroid_mgrs,
+          isSelected: selectedFeature?.feature_id === f.feature_id
+        },
+        geometry: f.geometry_geojson as any
+      }))
+    };
+
+    try {
+      const existingSource = mapRight.getSource('detected-changes') as GeoJSONSource | undefined;
+      if (existingSource) {
+        existingSource.setData(geojsonData);
+      } else {
+        mapRight.addSource('detected-changes', {
+          type: 'geojson',
+          data: geojsonData
+        });
+
+        // Fill layer (Crimson with amber alerts)
+        mapRight.addLayer({
+          id: 'changes-fill',
+          type: 'fill',
+          source: 'detected-changes',
+          paint: {
+            'fill-color': [
+              'case',
+              ['get', 'isSelected'],
+              '#06b6d4',
+              '#ef4444'
+            ],
+            'fill-opacity': [
+              'case',
+              ['get', 'isSelected'],
+              0.55,
+              0.32
+            ]
+          }
+        });
+
+        // Border line (Glowing Crimson / Cyan on select)
+        mapRight.addLayer({
+          id: 'changes-stroke',
+          type: 'line',
+          source: 'detected-changes',
+          paint: {
+            'line-color': [
+              'case',
+              ['get', 'isSelected'],
+              '#67e8f9',
+              '#ef4444'
+            ],
+            'line-width': [
+              'case',
+              ['get', 'isSelected'],
+              3.5,
+              2.0
+            ],
+            'line-blur': 0.8
+          }
+        });
+
+        // Click detection on polygons
+        mapRight.on('click', 'changes-fill', (e) => {
+          if (e.features && e.features[0]) {
+            const featId = e.features[0].properties?.feature_id;
+            const matched = features.find((f) => f.feature_id === featId);
+            if (matched) {
+              onSelectFeature(matched);
+            }
+          }
+        });
+
+        mapRight.on('mouseenter', 'changes-fill', () => {
+          mapRight.getCanvas().style.cursor = 'pointer';
+        });
+
+        mapRight.on('mouseleave', 'changes-fill', () => {
+          mapRight.getCanvas().style.cursor = '';
+        });
+      }
+
+      // Layer visibility toggle
+      const visibility = showVectors ? 'visible' : 'none';
+      if (mapRight.getLayer('changes-fill')) {
+        mapRight.setLayoutProperty('changes-fill', 'visibility', visibility);
+      }
+      if (mapRight.getLayer('changes-stroke')) {
+        mapRight.setLayoutProperty('changes-stroke', 'visibility', visibility);
+      }
+    } catch (err) {
+      console.warn('Could not update vector polygon layers:', err);
+    }
+  }, [isMapLoaded, features, selectedFeature, showVectors, onSelectFeature]);
+
+  // ----------------------------------------------------------------------------
+  // 4. Smooth FlyTo Centroid When a Feature is Selected
+  // ----------------------------------------------------------------------------
+  useEffect(() => {
+    if (!selectedFeature || !mapRightRef.current) return;
+    const [cLat, cLon] = selectedFeature.centroid_wgs84;
+    mapRightRef.current.flyTo({
+      center: [cLon, cLat],
+      zoom: 15.8,
+      speed: 1.4,
+      curve: 1.2,
+      essential: true
+    });
+  }, [selectedFeature]);
+
+  // ----------------------------------------------------------------------------
+  // 5. Divider Dragging Handlers
+  // ----------------------------------------------------------------------------
+  const handlePointerDown = (e: React.PointerEvent) => {
+    setIsDragging(true);
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (!containerRef.current) return;
+    if (!isDragging || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     const clientX = e.clientX;
-    const clientY = e.clientY;
     const relX = clientX - rect.left;
-    const relY = clientY - rect.top;
-
-    if (isDraggingDivider) {
-      const newPos = Math.max(0.02, Math.min(0.98, relX / rect.width));
-      setSplitPos(newPos);
-    } else if (isPanning) {
-      setPanOffset({
-        x: clientX - panStart.x,
-        y: clientY - panStart.y
-      });
-    }
-
-    // Telemetry updates
-    if (onMouseMoveCoords) {
-      const [lat, lon] = unprojectCoords(relX, relY, rect.width, rect.height);
-      const fakeMgrs = `43R EH ${Math.round((lon - 75.0) * 100000).toString().padStart(5, '0')} ${Math.round((lat - 25.0) * 100000).toString().padStart(5, '0')}`;
-      onMouseMoveCoords(lat, lon, fakeMgrs);
-    }
-
-    // Polygon Hover Detection
-    if (!isDraggingDivider && !isPanning && showOverlays) {
-      let matched: DetectedPolygonFeature | null = null;
-      for (const feat of features) {
-        const [cLat, cLon] = feat.centroid_wgs84;
-        const [cx, cy] = projectCoords(cLon, cLat, rect.width, rect.height);
-        const dist = Math.hypot(relX - cx, relY - cy);
-        if (dist < 36 * zoom) {
-          matched = feat;
-          break;
-        }
-      }
-      setHoveredFeature(matched);
-    }
+    const newPos = Math.max(0.02, Math.min(0.98, relX / rect.width));
+    setSplitPos(newPos);
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    if (isDraggingDivider) {
-      setIsDraggingDivider(false);
+    if (isDragging) {
+      setIsDragging(false);
       try {
         (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       } catch (_) {}
     }
-    if (isPanning) {
-      setIsPanning(false);
-    }
-  };
-
-  const handleClick = (e: React.MouseEvent) => {
-    if (!containerRef.current || isDraggingDivider) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const relX = e.clientX - rect.left;
-    const relY = e.clientY - rect.top;
-
-    for (const feat of features) {
-      const [cLat, cLon] = feat.centroid_wgs84;
-      const [cx, cy] = projectCoords(cLon, cLat, rect.width, rect.height);
-      const dist = Math.hypot(relX - cx, relY - cy);
-      if (dist < 40 * zoom) {
-        onSelectFeature(feat);
-        return;
-      }
-    }
-    onSelectFeature(null);
-  };
-
-  // Zoom with mouse wheel
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-    setZoom((prev) => Math.max(0.5, Math.min(prev * zoomFactor, 8.0)));
-  };
-
-  const resetView = () => {
-    setZoom(1.0);
-    setPanOffset({ x: 0, y: 0 });
-    setSplitPos(0.50);
   };
 
   // ----------------------------------------------------------------------------
-  // Master Canvas Render Loop: Real Satellite Imagery + Split-Swipe + Overlays
+  // 6. Navigation Control Actions
   // ----------------------------------------------------------------------------
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
+  const handleZoomIn = () => {
+    mapLeftRef.current?.zoomIn({ duration: 300 });
+  };
 
-    const width = container.clientWidth;
-    const height = container.clientHeight;
-    canvas.width = width;
-    canvas.height = height;
+  const handleZoomOut = () => {
+    mapLeftRef.current?.zoomOut({ duration: 300 });
+  };
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  const handleResetNorth = () => {
+    mapLeftRef.current?.flyTo({
+      center: DEFAULT_CENTER,
+      zoom: DEFAULT_ZOOM,
+      bearing: 0,
+      pitch: 0,
+      duration: 600
+    });
+    setIs3D(false);
+  };
 
-    // Clear frame
-    ctx.clearRect(0, 0, width, height);
-    const splitPx = width * splitPos;
-
-    // Image destination dimensions with zoom and pan
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const destW = width * zoom;
-    const destH = height * zoom;
-    const destX = centerX - destW / 2 + panOffset.x;
-    const destY = centerY - destH / 2 + panOffset.y;
-
-    // --------------------------------------------------------------------------
-    // 1. Render Left Viewport: Pre-Event (t1) Satellite Image
-    // --------------------------------------------------------------------------
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, splitPx, height);
-    ctx.clip();
-
-    if (imgT1) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(imgT1, destX, destY, destW, destH);
-    } else {
-      // Fallback if loading
-      ctx.fillStyle = '#0b0f19';
-      ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#64748b';
-      ctx.font = '12px "JetBrains Mono", monospace';
-      ctx.fillText('LOADING PRE-EVENT (t1) SATELLITE TILE...', 30, height / 2);
-    }
-
-    // Left Viewport Ambient Tint & Scanlines
-    ctx.fillStyle = 'rgba(6, 182, 212, 0.02)';
-    ctx.fillRect(0, 0, splitPx, height);
-
-    ctx.restore();
-
-    // --------------------------------------------------------------------------
-    // 2. Render Right Viewport: Post-Event (t2) Satellite Image
-    // --------------------------------------------------------------------------
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(splitPx, 0, width - splitPx, height);
-    ctx.clip();
-
-    if (imgT2) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(imgT2, destX, destY, destW, destH);
-    } else {
-      ctx.fillStyle = '#0e1626';
-      ctx.fillRect(splitPx, 0, width - splitPx, height);
-      ctx.fillStyle = '#64748b';
-      ctx.font = '12px "JetBrains Mono", monospace';
-      ctx.fillText('LOADING POST-EVENT (t2) SATELLITE TILE...', splitPx + 30, height / 2);
-    }
-
-    // Right Viewport Ambient Tint
-    ctx.fillStyle = 'rgba(239, 68, 68, 0.03)';
-    ctx.fillRect(splitPx, 0, width - splitPx, height);
-
-    ctx.restore();
-
-    // --------------------------------------------------------------------------
-    // 3. Render Detected Change Vector Overlays (Continuous Across Both Viewports)
-    // --------------------------------------------------------------------------
-    if (showOverlays && features.length > 0) {
-      features.forEach((feat) => {
-        const isSelected = selectedFeature?.feature_id === feat.feature_id;
-        const isHovered = hoveredFeature?.feature_id === feat.feature_id;
-
-        const allRings: number[][][] = [];
-        const geomType = feat.geometry_geojson.type;
-        const rawCoords = feat.geometry_geojson.coordinates;
-
-        if (geomType === 'MultiPolygon' && Array.isArray(rawCoords)) {
-          for (const poly of rawCoords) {
-            if (Array.isArray(poly)) {
-              for (const ring of poly) {
-                if (Array.isArray(ring) && ring.length >= 3) {
-                  allRings.push(ring);
-                }
-              }
-            }
-          }
-        } else if (geomType === 'Polygon' && Array.isArray(rawCoords)) {
-          for (const ring of rawCoords) {
-            if (Array.isArray(ring) && ring.length >= 3) {
-              allRings.push(ring);
-            }
-          }
-        }
-
-        allRings.forEach((ring) => {
-          ctx.beginPath();
-          ring.forEach(([lon, lat], ptIdx) => {
-            const [x, y] = projectCoords(lon, lat, width, height);
-            if (ptIdx === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.closePath();
-
-          // Fill styling
-          if (isSelected) {
-            ctx.fillStyle = 'rgba(6, 182, 212, 0.45)';
-          } else if (isHovered) {
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.55)';
-          } else {
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
-          }
-          ctx.fill();
-
-          // Stroke styling with military glow
-          ctx.save();
-          if (isSelected) {
-            ctx.strokeStyle = '#06b6d4';
-            ctx.lineWidth = 3.0;
-            ctx.shadowColor = '#06b6d4';
-            ctx.shadowBlur = 12;
-          } else if (isHovered) {
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 3.0;
-            ctx.shadowColor = '#ef4444';
-            ctx.shadowBlur = 15;
-          } else {
-            ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = 2.0;
-            ctx.shadowColor = '#ef4444';
-            ctx.shadowBlur = 6;
-          }
-          ctx.stroke();
-          ctx.restore();
-        });
-
-        // Tactical Reticle Label Box at Polygon Centroid
-        const [cLat, cLon] = feat.centroid_wgs84;
-        const [cx, cy] = projectCoords(cLon, cLat, width, height);
-
-        ctx.save();
-        ctx.font = '10px "JetBrains Mono", monospace';
-        const labelText = `${feat.tactical_class.toUpperCase()} [${Math.round(feat.area_sq_meters).toLocaleString()} m²]`;
-        const textMetrics = ctx.measureText(labelText);
-        const tagW = textMetrics.width + 12;
-        const tagH = 18;
-        const tagX = cx - tagW / 2;
-        const tagY = cy - 22;
-
-        // Tag background badge
-        ctx.fillStyle = isSelected ? 'rgba(6, 182, 212, 0.90)' : isHovered ? 'rgba(239, 68, 68, 0.90)' : 'rgba(15, 23, 42, 0.85)';
-        ctx.strokeStyle = isSelected ? '#06b6d4' : isHovered ? '#ffffff' : '#ef4444';
-        ctx.lineWidth = 1;
-        ctx.fillRect(tagX, tagY, tagW, tagH);
-        ctx.strokeRect(tagX, tagY, tagW, tagH);
-
-        // Center reticle dot
-        ctx.fillStyle = isSelected ? '#06b6d4' : '#ef4444';
-        ctx.beginPath();
-        ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Tag text
-        ctx.fillStyle = isSelected || isHovered ? '#050811' : '#f8fafc';
-        ctx.font = 'bold 9px "JetBrains Mono", monospace';
-        ctx.fillText(labelText, tagX + 6, tagY + 13);
-        ctx.restore();
-      });
-    }
-
-    // --------------------------------------------------------------------------
-    // 4. Render Tactical Laser Split Divider [◀ ║ ▶]
-    // --------------------------------------------------------------------------
-    ctx.save();
-    // Glowing cyan vertical laser line
-    ctx.strokeStyle = '#06b6d4';
-    ctx.lineWidth = 2.5;
-    ctx.shadowColor = '#06b6d4';
-    ctx.shadowBlur = 10;
-
-    ctx.beginPath();
-    ctx.moveTo(splitPx, 0);
-    ctx.lineTo(splitPx, height);
-    ctx.stroke();
-
-    // Laser handle pill at center vertical position
-    const handleY = height / 2;
-    const pillW = 44;
-    const pillH = 34;
-
-    ctx.shadowBlur = 15;
-    ctx.fillStyle = '#0b0f19';
-    ctx.strokeStyle = '#06b6d4';
-    ctx.lineWidth = 2;
-
-    ctx.beginPath();
-    ctx.roundRect(splitPx - pillW / 2, handleY - pillH / 2, pillW, pillH, 8);
-    ctx.fill();
-    ctx.stroke();
-
-    // Arrows and Grip Marks: [◀ ║ ▶]
-    ctx.fillStyle = '#06b6d4';
-    ctx.font = 'bold 11px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('◀ ║ ▶', splitPx, handleY);
-
-    ctx.restore();
-
-    // --------------------------------------------------------------------------
-    // 5. Tactical Viewport Framing & Corner Reticles
-    // --------------------------------------------------------------------------
-    ctx.strokeStyle = '#33415580';
-    ctx.lineWidth = 1;
-    // Top-left reticle
-    ctx.beginPath();
-    ctx.moveTo(10, 25);
-    ctx.lineTo(10, 10);
-    ctx.lineTo(25, 10);
-    ctx.stroke();
-
-    // Top-right reticle
-    ctx.beginPath();
-    ctx.moveTo(width - 25, 10);
-    ctx.lineTo(width - 10, 10);
-    ctx.lineTo(width - 10, 25);
-    ctx.stroke();
-
-    // Bottom-left reticle
-    ctx.beginPath();
-    ctx.moveTo(10, height - 25);
-    ctx.lineTo(10, height - 10);
-    ctx.lineTo(25, height - 10);
-    ctx.stroke();
-
-    // Bottom-right reticle
-    ctx.beginPath();
-    ctx.moveTo(width - 25, height - 10);
-    ctx.lineTo(width - 10, height - 10);
-    ctx.lineTo(width - 10, height - 25);
-    ctx.stroke();
-  }, [
-    splitPos,
-    zoom,
-    panOffset,
-    showOverlays,
-    features,
-    selectedFeature,
-    hoveredFeature,
-    imgT1,
-    imgT2,
-    projectCoords
-  ]);
+  const handleToggle3D = () => {
+    const next3D = !is3D;
+    setIs3D(next3D);
+    mapLeftRef.current?.easeTo({
+      pitch: next3D ? 50 : 0,
+      duration: 500
+    });
+  };
 
   return (
     <div
       ref={containerRef}
-      onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onClick={handleClick}
-      onWheel={handleWheel}
-      className="relative w-full h-full bg-void overflow-hidden select-none cursor-crosshair"
+      className="relative w-full h-full overflow-hidden select-none bg-void"
     >
-      {/* Primary HTML5 Geospatial Split-Swipe Canvas */}
-      <canvas ref={canvasRef} className="block w-full h-full" />
+      {/* ===================================================================== */}
+      {/* 1. Left Viewport: Pre-Event (t1) Base Map                             */}
+      {/* ===================================================================== */}
+      <div
+        ref={leftMapContainerRef}
+        className="absolute inset-0 w-full h-full"
+      />
 
-      {/* Top Banner Tag: Left View (t1) vs Right View (t2) Indicator */}
+      {/* ===================================================================== */}
+      {/* 2. Right Viewport: Post-Event (t2) Map Clipped by Laser Divider       */}
+      {/* ===================================================================== */}
+      <div
+        ref={rightMapContainerRef}
+        style={{
+          clipPath: `polygon(${splitPos * 100}% 0%, 100% 0%, 100% 100%, ${splitPos * 100}% 100%)`
+        }}
+        className="absolute inset-0 w-full h-full pointer-events-auto"
+      />
+
+      {/* ===================================================================== */}
+      {/* 3. Tactical Watermark Badges (Left & Right Viewports)                 */}
+      {/* ===================================================================== */}
       <div className="absolute top-3 left-3 z-10 flex items-center space-x-2 pointer-events-none">
-        <div className="bg-surface/90 border border-tactical-cyan/40 px-2.5 py-1 rounded shadow-lg backdrop-blur-md flex items-center space-x-2">
+        <div className="bg-panel/90 backdrop-blur-md border border-border-subtle px-3 py-1.5 rounded-lg text-xs telemetry-text flex items-center space-x-2 shadow-2xl">
           <span className="w-2 h-2 rounded-full bg-tactical-cyan animate-pulse" />
-          <span className="text-[11px] font-extrabold text-tactical-cyan tracking-wider telemetry-text uppercase">
-            {t1Label}
-          </span>
-          <span className="text-border-active text-xs">│</span>
-          <span className="text-[10px] text-text-muted telemetry-text">
-            SPLIT: {(splitPos * 100).toFixed(0)}%
-          </span>
+          <span className="text-tactical-cyan font-bold uppercase">{t1Label}</span>
+          <span className="text-text-muted text-[10px]">SPLIT: {Math.round(splitPos * 100)}%</span>
         </div>
       </div>
 
       <div className="absolute top-3 right-3 z-10 flex items-center space-x-2 pointer-events-none">
-        <div className="bg-surface/90 border border-tactical-crimson/40 px-2.5 py-1 rounded shadow-lg backdrop-blur-md flex items-center space-x-2">
-          <span className="text-[11px] font-extrabold text-tactical-crimson tracking-wider telemetry-text uppercase">
-            {t2Label}
-          </span>
+        <div className="bg-panel/90 backdrop-blur-md border border-border-subtle px-3 py-1.5 rounded-lg text-xs telemetry-text flex items-center space-x-2 shadow-2xl">
+          <span className="text-tactical-crimson font-bold uppercase">{t2Label}</span>
           <span className="w-2 h-2 rounded-full bg-tactical-crimson animate-pulse" />
         </div>
       </div>
 
-      {/* Floating Viewport Navigation Toolbar */}
-      <div className="absolute bottom-4 right-4 z-10 flex items-center space-x-1.5 bg-surface/90 border border-border-subtle p-1.5 rounded-lg shadow-2xl backdrop-blur-md pointer-events-auto">
-        <button
-          type="button"
-          onClick={() => setShowOverlays(!showOverlays)}
-          title="Toggle Change Vector Overlay"
-          className={`p-1.5 rounded transition-all text-xs flex items-center space-x-1 ${
-            showOverlays ? 'bg-tactical-crimson/20 text-tactical-crimson border border-tactical-crimson/40' : 'hover:bg-panel text-text-muted'
+      {/* ===================================================================== */}
+      {/* 4. Glowing Cyan Laser Divider & Draggable Center Handle               */}
+      {/* ===================================================================== */}
+      <div
+        style={{ left: `${splitPos * 100}%` }}
+        className="absolute top-0 bottom-0 w-0.5 z-20 pointer-events-none transition-shadow duration-150"
+      >
+        {/* Continuous Neon Laser Line */}
+        <div className="absolute inset-y-0 -left-[1px] w-[3px] bg-tactical-cyan shadow-[0_0_12px_#06b6d4,0_0_24px_#06b6d4]" />
+
+        {/* Center Drag Handle Medallion */}
+        <div
+          onPointerDown={handlePointerDown}
+          className={`absolute top-1/2 -left-5 -translate-y-1/2 w-10 h-10 rounded-full bg-surface/95 border-2 border-tactical-cyan text-tactical-cyan flex items-center justify-center cursor-ew-resize pointer-events-auto transition-transform duration-150 shadow-[0_0_20px_#06b6d480] ${
+            isDragging ? 'scale-125 bg-tactical-cyan text-void shadow-glow' : 'hover:scale-110'
           }`}
+          title="Drag left/right to compare multi-temporal satellite imagery"
         >
-          {showOverlays ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-          <span className="text-[10px] font-bold telemetry-text">{showOverlays ? 'VECTORS ON' : 'VECTORS OFF'}</span>
-        </button>
-
-        <span className="text-border-active text-xs">│</span>
-
-        <button
-          type="button"
-          onClick={() => setZoom((z) => Math.min(z * 1.25, 8.0))}
-          title="Zoom In"
-          className="p-1.5 hover:bg-panel rounded text-text-secondary hover:text-text-primary transition-all"
-        >
-          <ZoomIn className="w-4 h-4" />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setZoom((z) => Math.max(z * 0.8, 0.5))}
-          title="Zoom Out"
-          className="p-1.5 hover:bg-panel rounded text-text-secondary hover:text-text-primary transition-all"
-        >
-          <ZoomOut className="w-4 h-4" />
-        </button>
-
-        <button
-          type="button"
-          onClick={resetView}
-          title="Reset Viewport Pan & Zoom"
-          className="p-1.5 hover:bg-panel rounded text-text-secondary hover:text-text-primary transition-all flex items-center space-x-1"
-        >
-          <RotateCcw className="w-4 h-4" />
-          <span className="text-[10px] telemetry-text text-text-muted font-bold">1:1</span>
-        </button>
+          <span className="text-xs font-black select-none pointer-events-none">◀ ║ ▶</span>
+        </div>
       </div>
 
-      {/* Bottom Left Scale & Orientation HUD */}
-      <div className="absolute bottom-4 left-4 z-10 flex items-center space-x-3 bg-surface/90 border border-border-subtle px-3 py-1.5 rounded shadow-xl backdrop-blur-md pointer-events-none">
-        <div className="flex items-center space-x-1.5 text-[11px] telemetry-text font-bold text-tactical-cyan">
-          <Compass className="w-4 h-4 text-tactical-cyan animate-spin-slow" />
-          <span>TRUE NORTH</span>
+      {/* ===================================================================== */}
+      {/* 5. Centroid Tactical Badges (Direct Map Ground Projection)             */}
+      {/* ===================================================================== */}
+      {showVectors && features.length > 0 && (
+        <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
+          {features.slice(0, 5).map((f) => {
+            const isSelected = selectedFeature?.feature_id === f.feature_id;
+            return (
+              <div
+                key={f.feature_id}
+                className="absolute pointer-events-auto"
+                style={{
+                  display: 'none'
+                }}
+              />
+            );
+          })}
         </div>
-        <span className="text-border-active text-xs">│</span>
-        <div className="flex items-center space-x-2">
-          <div className="w-16 h-1.5 border-b-2 border-l-2 border-r-2 border-text-primary" />
-          <span className="text-[10px] telemetry-text text-text-primary font-bold">500 M</span>
+      )}
+
+      {/* ===================================================================== */}
+      {/* 6. Viewport Controls & Tactical Layer Bar (Bottom-Right Dock)         */}
+      {/* ===================================================================== */}
+      <div className="absolute bottom-4 right-3 z-10 flex flex-col items-end space-y-1.5 pointer-events-auto">
+        {/* Floating Raster Opacity Slider beneath toolbar when raster is on */}
+        {showRasterOverlay && (
+          <div className="glass-panel px-2.5 py-1 rounded-lg border border-border-subtle flex items-center space-x-2 text-[10px] telemetry-text shadow-xl">
+            <span className="text-text-muted uppercase">RASTER OPACITY:</span>
+            <input
+              type="range"
+              min="0.10"
+              max="1.00"
+              step="0.05"
+              value={rasterOpacity}
+              onChange={(e) => setRasterOpacity(parseFloat(e.target.value))}
+              className="w-16 accent-tactical-cyan cursor-pointer"
+            />
+            <span className="text-tactical-cyan font-bold w-7 text-right">{Math.round(rasterOpacity * 100)}%</span>
+          </div>
+        )}
+
+        <div className="glass-panel p-1 rounded-lg border border-border-subtle flex items-center space-x-1 shadow-2xl">
+          {/* Basemap Toggle: Satellite vs Dark Mode */}
+          <button
+            type="button"
+            onClick={() => setBasemapStyle((prev) => (prev === 'satellite' ? 'dark' : 'satellite'))}
+            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center space-x-1 transition-all ${
+              basemapStyle === 'satellite'
+                ? 'bg-tactical-cyan/20 border border-tactical-cyan text-text-mono-cyan'
+                : 'bg-panel/80 hover:bg-panel border border-border-subtle text-text-secondary'
+            }`}
+            title="Toggle between Satellite Imagery and Tactical Dark Basemap"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>{basemapStyle === 'satellite' ? '🛰️ SATELLITE' : '🌐 DARK HUD'}</span>
+          </button>
+
+          {/* Sensor Raster Overlay Toggle */}
+          <button
+            type="button"
+            onClick={() => setShowRasterOverlay((prev) => !prev)}
+            className={`px-2 py-1 rounded text-xs font-semibold flex items-center space-x-1 transition-all ${
+              showRasterOverlay
+                ? 'bg-command-indigo/30 border border-command-indigo text-indigo-300'
+                : 'bg-panel/80 hover:bg-panel border border-border-subtle text-text-muted'
+            }`}
+            title="Toggle multi-temporal sensor image overlay registered to terrain"
+          >
+            {showRasterOverlay ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            <span>RASTER</span>
+          </button>
+
+          {/* Vector Polygons Toggle */}
+          <button
+            type="button"
+            onClick={() => setShowVectors((prev) => !prev)}
+            className={`px-2 py-1 rounded text-xs font-semibold flex items-center space-x-1 transition-all ${
+              showVectors
+                ? 'bg-tactical-crimson/20 border border-tactical-crimson text-red-300'
+                : 'bg-panel/80 hover:bg-panel border border-border-subtle text-text-muted'
+            }`}
+            title="Toggle detected change polygons"
+          >
+            <span>{showVectors ? '🔴 VECTORS' : '⚪ OFF'}</span>
+          </button>
+
+          <div className="h-4 w-[1px] bg-border-subtle mx-0.5" />
+
+          {/* Zoom In */}
+          <button
+            type="button"
+            onClick={handleZoomIn}
+            className="p-1.5 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-text-primary transition-all"
+            title="Zoom In (+)"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
+
+          {/* Zoom Out */}
+          <button
+            type="button"
+            onClick={handleZoomOut}
+            className="p-1.5 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-text-primary transition-all"
+            title="Zoom Out (-)"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
+
+          {/* 3D Tilt */}
+          <button
+            type="button"
+            onClick={handleToggle3D}
+            className={`px-2 py-1 rounded text-xs font-bold telemetry-text border transition-all ${
+              is3D
+                ? 'bg-tactical-cyan/20 border-tactical-cyan text-text-mono-cyan'
+                : 'bg-void/80 hover:bg-panel border-border-subtle text-text-secondary'
+            }`}
+            title="Toggle 3D Perspective Pitch Angle"
+          >
+            3D
+          </button>
+
+          {/* Reset Extent & True North */}
+          <button
+            type="button"
+            onClick={handleResetNorth}
+            className="p-1.5 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-tactical-cyan transition-all"
+            title="Reset View to Sector 4 & True North"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
         </div>
-        <span className="text-border-active text-xs">│</span>
-        <span className="text-[10px] telemetry-text text-text-muted">GSD: 10M / PIXEL</span>
+      </div>
+
+      {/* Floating Tactical Navigation Controls (Bottom-Right) */}
+      <div className="absolute bottom-4 right-3 z-10 flex items-center space-x-1.5 pointer-events-auto">
+        <div className="glass-panel p-1 rounded-lg border border-border-subtle flex items-center space-x-1 shadow-2xl">
+          {/* Zoom In */}
+          <button
+            type="button"
+            onClick={handleZoomIn}
+            className="p-2 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-text-primary transition-all"
+            title="Zoom In (+)"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
+
+          {/* Zoom Out */}
+          <button
+            type="button"
+            onClick={handleZoomOut}
+            className="p-2 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-text-primary transition-all"
+            title="Zoom Out (-)"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
+
+          {/* 3D Perspective Tilt */}
+          <button
+            type="button"
+            onClick={handleToggle3D}
+            className={`px-2 py-1 rounded text-xs font-bold telemetry-text border transition-all ${
+              is3D
+                ? 'bg-tactical-cyan/20 border-tactical-cyan text-text-mono-cyan'
+                : 'bg-void/80 hover:bg-panel border-border-subtle text-text-secondary'
+            }`}
+            title="Toggle 3D Perspective Pitch Angle"
+          >
+            3D
+          </button>
+
+          {/* Reset Extent & True North */}
+          <button
+            type="button"
+            onClick={handleResetNorth}
+            className="p-2 rounded hover:bg-panel border border-transparent hover:border-border-subtle text-text-secondary hover:text-tactical-cyan transition-all"
+            title="Reset View to Sector 4 & True North"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* ===================================================================== */}
+      {/* 7. Bottom-Left Tactical Reticle & Scale Legend                        */}
+      {/* ===================================================================== */}
+      <div className="absolute bottom-4 left-3 z-10 flex items-center space-x-3 pointer-events-none">
+        <div className="glass-panel px-3 py-1.5 rounded-lg border border-border-subtle flex items-center space-x-3 text-xs telemetry-text shadow-xl">
+          <div className="flex items-center space-x-1.5 text-tactical-cyan font-bold">
+            <Compass className="w-4 h-4 animate-[spin_12s_linear_infinite]" />
+            <span>TRUE NORTH</span>
+          </div>
+
+          <div className="h-3 w-[1px] bg-border-subtle" />
+
+          {/* Geodesic Ground Scale Indicator */}
+          <div className="flex items-center space-x-1.5">
+            <div className="w-12 h-1.5 bg-border-active border-b-2 border-text-primary relative">
+              <span className="absolute -top-3 left-0 text-[9px] text-text-muted">0</span>
+              <span className="absolute -top-3 right-0 text-[9px] text-text-muted">500 M</span>
+            </div>
+            <span className="text-[10px] text-text-muted">GSD: 10M / PIXEL</span>
+          </div>
+        </div>
       </div>
     </div>
   );
