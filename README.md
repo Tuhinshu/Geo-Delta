@@ -310,13 +310,3 @@ pytest backend/tests/ -v
 
 1. **Deterministic Chain of Custody:** Every processed satellite raster and exported intelligence brief generates SHA-256 digests recorded into an append-only audit trail (`AuditLog`).
 2. **Air-Gapped Isolation:** Zero outbound network requests; zero tracking telemetry; fully isolated from public internet exposure.
-3. **Defense Clearance Classification:** The interface adheres to strict defense classification markers (`RESTRICTED // GEOINT ASSESSMENT // FOR OFFICIAL USE ONLY // SIH26227`).
-
----
-
-<div align="center">
-
-**GeoDelta GEOINT Platform** — Developed for the **Smart India Hackathon 2026 (SIH26227)**  
-*Ministry of Defence • Government of India*
-
-</div>
