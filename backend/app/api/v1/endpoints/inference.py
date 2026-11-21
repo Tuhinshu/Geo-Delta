@@ -6,15 +6,51 @@ Provides sub-150ms counter-factual query evaluation over cached feature pyramids
 
 import os
 import uuid
-from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from typing import Dict, Any, Optional
+from fastapi import APIRouter, HTTPException, status, UploadFile, File, Form
 
 from app.core.config import settings
 from app.core.schemas import InferenceRequest, CounterFactualRequest, FeasibilityStatus
 from app.core.guardrails import validate_nyquist_resolution
 from app.workers.tasks import execute_inference_pipeline, execute_counterfactual_pipeline
+from app.services.direct_inference import run_direct_bitemporal_inference
 
 router = APIRouter(prefix="/inference", tags=["GEOINT Analysis"])
+
+
+@router.post(
+    "/analyze-upload",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="Submit User-Uploaded T1 & T2 Image Files via Drag & Drop"
+)
+async def submit_analysis_upload(
+    file_t1: UploadFile = File(..., description="Pre-event image (PNG, JPG, TIFF)"),
+    file_t2: UploadFile = File(..., description="Post-event image (PNG, JPG, TIFF)"),
+    query_text: str = Form("Identify newly constructed infrastructure"),
+    negative_query: Optional[str] = Form(None),
+    confidence_threshold: float = Form(0.45)
+) -> Dict[str, Any]:
+    """
+    Direct in-memory deep learning change detection on user-uploaded images.
+    Returns detected change polygons, areas in m², and base64 heatmap overlay.
+    """
+    try:
+        t1_bytes = await file_t1.read()
+        t2_bytes = await file_t2.read()
+
+        return run_direct_bitemporal_inference(
+            img1_bytes=t1_bytes,
+            img2_bytes=t2_bytes,
+            query_text=query_text,
+            negative_query=negative_query,
+            confidence_threshold=confidence_threshold
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Inference execution failed: {str(exc)}"
+        )
 
 
 @router.post(

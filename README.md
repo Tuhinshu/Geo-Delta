@@ -16,7 +16,7 @@
 
 <br />
 
-**GeoDelta** is an enterprise-grade, air-gapped Geospatial Intelligence (GEOINT) platform designed for tactical command centers and defense analysts. It automates multi-temporal satellite change detection across open-vocabulary operational queries (e.g., *"Identify newly paved airstrip extensions and fortified bastions"*), mathematically suppresses seasonal vegetation/soil moisture false alarms, and compiles cryptographically verifiable intelligence dossiers.
+**GeoDelta** is an enterprise-grade, air-gapped Geospatial Intelligence (GEOINT) platform designed for tactical command centers and defense analysts. It automates multi-temporal satellite change detection across open-vocabulary operational queries (e.g., "Identify newly paved airstrip extensions and fortified bastions"), mathematically suppresses seasonal vegetation/soil moisture false alarms, and compiles cryptographically verifiable intelligence dossiers.
 
 </div>
 

@@ -60,40 +60,25 @@ def extract_localized_chip(
     chip_size: int = 512,
 ) -> np.ndarray:
     """
-    Extracts a square optical chip of size (chip_size x chip_size) centered at center_rc (row, col).
-    If center_rc is None, uses center of raster. Handles boundary edge padding safely.
+    Extracts a square optical chip of size (chip_size x chip_size).
+    Performs high-quality optical resizing so the imagery completely fills the chip panel
+    without empty black borders or void padding.
     """
     rgb = ensure_uint8_rgb(raster)
     h, w, c = rgb.shape
 
-    if center_rc is None:
-        cr, cc = h // 2, w // 2
-    else:
+    # If center_rc is provided and image is significantly larger than chip_size, crop and resize
+    if center_rc is not None and (h > chip_size or w > chip_size):
         cr, cc = center_rc
+        half = min(h, w) // 2
+        r_min, r_max = max(0, cr - half), min(h, cr + half)
+        c_min, c_max = max(0, cc - half), min(w, cc + half)
+        crop = rgb[r_min:r_max, c_min:c_max]
+        if crop.size > 0:
+            return cv2.resize(crop, (chip_size, chip_size), interpolation=cv2.INTER_AREA)
 
-    half = chip_size // 2
-    r_min, r_max = cr - half, cr + half
-    c_min, c_max = cc - half, cc + half
-
-    # Initialize padded output with dark void fill
-    chip = np.zeros((chip_size, chip_size, c), dtype=np.uint8)
-
-    # Overlapping source coordinates
-    src_r1 = max(0, r_min)
-    src_r2 = min(h, r_max)
-    src_c1 = max(0, c_min)
-    src_c2 = min(w, c_max)
-
-    # Destination coordinates inside chip
-    dst_r1 = src_r1 - r_min
-    dst_r2 = dst_r1 + (src_r2 - src_r1)
-    dst_c1 = src_c1 - c_min
-    dst_c2 = dst_c1 + (src_c2 - src_c1)
-
-    if (src_r2 > src_r1) and (src_c2 > src_c1):
-        chip[dst_r1:dst_r2, dst_c1:dst_c2] = rgb[src_r1:src_r2, src_c1:src_c2]
-
-    return chip
+    # Standard clean full optical scene resize to chip_size x chip_size
+    return cv2.resize(rgb, (chip_size, chip_size), interpolation=cv2.INTER_AREA)
 
 
 def render_vector_overlay_chip(
@@ -104,7 +89,7 @@ def render_vector_overlay_chip(
     chip_size: int = 512,
     outline_color_bgr: Tuple[int, int, int] = (0, 68, 239),  # Crimson in BGR
     glow_color_bgr: Tuple[int, int, int] = (212, 182, 6),    # Cyan in BGR
-    alpha: float = 0.40,
+    alpha: float = 0.45,
 ) -> np.ndarray:
     """
     Renders vector change polygons on top of t2 base imagery with semi-transparent
@@ -112,23 +97,19 @@ def render_vector_overlay_chip(
     """
     chip_t2 = extract_localized_chip(base_raster_t2, center_rc=center_rc, chip_size=chip_size)
     overlay = chip_t2.copy()
+    h_chip, w_chip = chip_t2.shape[:2]
 
-    # Pre-calculate offset from raster to chip coordinates
-    h_full, w_full = base_raster_t2.shape[:2]
-    if center_rc is None:
-        cr, cc = h_full // 2, w_full // 2
-    else:
-        cr, cc = center_rc
+    scale_x = w_chip / 512.0
+    scale_y = h_chip / 512.0
 
-    half = chip_size // 2
-    r_offset, c_offset = cr - half, cc - half
-
+    # Collect all polygon rings and geographic points
+    all_rings = []
+    all_geo_pts = []
     for feat in polygons:
         geom = feat.get("geometry_geojson", {})
         coords = geom.get("coordinates", [])
         gtype = geom.get("type", "Polygon")
 
-        # Parse polygon coordinate rings into pixel contours
         poly_rings = []
         if gtype == "Polygon" and coords:
             poly_rings = coords
@@ -137,31 +118,64 @@ def render_vector_overlay_chip(
                 poly_rings.extend(p)
 
         for ring in poly_rings:
-            pts = []
-            for pt in ring:
-                if len(pt) < 2:
-                    continue
-                # If coordinates are in geographic WGS84 [lon, lat] and affine is provided
-                if affine_transform is not None:
-                    lon, lat = pt[0], pt[1]
-                    inv_transform = ~affine_transform
-                    c_px, r_px = inv_transform * (lon, lat)
-                else:
-                    # Assumed already in pixel coords [c, r] or [x, y]
-                    c_px, r_px = pt[0], pt[1]
+            valid_ring = [pt for pt in ring if len(pt) >= 2]
+            if len(valid_ring) >= 3:
+                all_rings.append(valid_ring)
+                for pt in valid_ring:
+                    if abs(pt[0]) <= 180 and abs(pt[1]) <= 90:
+                        all_geo_pts.append(pt)
 
-                # Map to chip local coordinates
-                chip_c = int(round(c_px - c_offset))
-                chip_r = int(round(r_px - r_offset))
-                pts.append([chip_c, chip_r])
+    # Determine coordinate mapping mode
+    auto_norm = False
+    min_lon, max_lon, min_lat, max_lat = 0.0, 0.0, 0.0, 0.0
+    if affine_transform is None and all_geo_pts:
+        all_lons = [p[0] for p in all_geo_pts]
+        all_lats = [p[1] for p in all_geo_pts]
+        min_lon, max_lon = min(all_lons), max(all_lons)
+        min_lat, max_lat = min(all_lats), max(all_lats)
 
-            if len(pts) >= 3:
-                cnt = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
-                # Fill polygon on overlay with crimson
-                cv2.fillPoly(overlay, [cnt], (239, 68, 68))
-                # Draw high-contrast outer boundary with antialiasing
-                cv2.polylines(overlay, [cnt], isClosed=True, color=(255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
-                cv2.polylines(overlay, [cnt], isClosed=True, color=(239, 68, 68), thickness=1, lineType=cv2.LINE_AA)
+        # Check if they fit within default nominal grid [75.04, 75.12] and [24.98, 25.06]
+        in_default_grid = (75.040 <= min_lon <= 75.120 and 75.040 <= max_lon <= 75.120 and
+                           24.980 <= min_lat <= 25.060 and 24.980 <= max_lat <= 25.060)
+        if not in_default_grid:
+            # Enable auto-normalization with 20% margin
+            auto_norm = True
+            pad_lon = max((max_lon - min_lon) * 0.20, 0.001)
+            pad_lat = max((max_lat - min_lat) * 0.20, 0.001)
+            min_lon -= pad_lon
+            max_lon += pad_lon
+            min_lat -= pad_lat
+            max_lat += pad_lat
+
+    for ring in all_rings:
+        pts = []
+        for pt in ring:
+            if affine_transform is not None:
+                lon, lat = pt[0], pt[1]
+                inv_transform = ~affine_transform
+                c_px, r_px = inv_transform * (lon, lat)
+            elif auto_norm:
+                c_px = ((pt[0] - min_lon) / (max_lon - min_lon)) * 512.0
+                r_px = ((max_lat - pt[1]) / (max_lat - min_lat)) * 512.0
+            elif abs(pt[0]) <= 180 and abs(pt[1]) <= 90:
+                c_px = (pt[0] - 75.050) / 0.0001
+                r_px = (25.045 - pt[1]) / 0.0001
+            else:
+                c_px, r_px = pt[0], pt[1]
+
+            chip_c = int(round(c_px * scale_x))
+            chip_r = int(round(r_px * scale_y))
+            chip_c = max(0, min(w_chip - 1, chip_c))
+            chip_r = max(0, min(h_chip - 1, chip_r))
+            pts.append([chip_c, chip_r])
+
+        if len(pts) >= 3:
+            cnt = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+            # Fill polygon on overlay with tactical crimson
+            cv2.fillPoly(overlay, [cnt], (239, 68, 68))
+            # Draw high-contrast outer boundary with antialiasing
+            cv2.polylines(overlay, [cnt], isClosed=True, color=(255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+            cv2.polylines(overlay, [cnt], isClosed=True, color=(239, 68, 68), thickness=1, lineType=cv2.LINE_AA)
 
     # Alpha blend overlay over base image
     blended = cv2.addWeighted(overlay, alpha, chip_t2, 1.0 - alpha, 0)

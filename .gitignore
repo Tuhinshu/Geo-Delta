@@ -27,6 +27,7 @@ wheels/
 
 # Virtual Environments
 .venv/
+backend/.venv/
 venv/
 ENV/
 env/
@@ -63,3 +64,22 @@ yarn-error.log*
 Thumbs.db
 *.swp
 *.swo
+
+# Large model weights (stored externally / air-gapped per NFR-SEC-001/003)
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# Large compressed archives & datasets
+*.tar.zst
+*.zst
+*.tar.gz
+*.zip
+*.tar
+storage/samples/bigearthnet_test/
+
+# Local test outputs & scratches
+backend/test_output_dossier.pdf
+backend/test_dossier_*.png
+scratch_test_upload.py

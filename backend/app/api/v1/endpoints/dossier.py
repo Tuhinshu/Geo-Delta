@@ -5,13 +5,35 @@ Generates publication-grade military intelligence dossiers in PDF format and sta
 
 from __future__ import annotations
 
+import base64
+import io
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Response, status
+import numpy as np
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from app.services.dossier_generator import DossierGenerator
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dossier", tags=["Dossier & Exports"])
+
+
+def _decode_base64_raster(b64_str: Optional[str]) -> Optional[np.ndarray]:
+    """Decodes a base64 string or data URL into a uint8 RGB numpy array."""
+    if not b64_str or not isinstance(b64_str, str):
+        return None
+    try:
+        # Strip data URL prefix if present
+        if "," in b64_str:
+            b64_str = b64_str.split(",", 1)[1]
+        raw_bytes = base64.b64decode(b64_str.strip())
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        return np.array(img, dtype=np.uint8)
+    except Exception as exc:
+        logger.warning(f"Failed to decode base64 image for dossier export: {exc}")
+        return None
 
 
 class DossierExportRequest(BaseModel):
@@ -31,6 +53,8 @@ class DossierExportRequest(BaseModel):
     polygons: List[Dict[str, Any]] = Field(default_factory=list, description="List of detected polygon features")
     ecc_metrics: Optional[Dict[str, Any]] = Field(default=None, description="Sub-pixel ECC coregistration metrics")
     analyst_callsign: str = Field("OFFICER-IN-CHARGE-GEODELTA", description="Authenticated analyst military call-sign")
+    image_t1_base64: Optional[str] = Field(None, description="Base64 or data URL for Pre-Event optical imagery")
+    image_t2_base64: Optional[str] = Field(None, description="Base64 or data URL for Post-Event optical imagery")
 
 
 @router.post(
@@ -41,6 +65,9 @@ class DossierExportRequest(BaseModel):
 )
 async def export_intelligence_dossier(request: DossierExportRequest) -> Response:
     try:
+        raster_t1 = _decode_base64_raster(request.image_t1_base64)
+        raster_t2 = _decode_base64_raster(request.image_t2_base64)
+
         generator = DossierGenerator()
         pdf_bytes = generator.generate_dossier(
             task_id=request.task_id,
@@ -51,6 +78,8 @@ async def export_intelligence_dossier(request: DossierExportRequest) -> Response
             total_area_altered_sq_m=request.total_area_altered_sq_m,
             total_area_altered_ha=request.total_area_altered_ha,
             polygons=request.polygons,
+            raster_t1=raster_t1,
+            raster_t2=raster_t2,
             ecc_metrics=request.ecc_metrics,
             analyst_callsign=request.analyst_callsign,
         )

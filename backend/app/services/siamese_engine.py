@@ -161,13 +161,12 @@ class CrossAttentionBottleneck(nn.Module):
         k = k.view(b, 1, self.num_heads, self.head_dim).transpose(1, 2)     # (B, heads, 1, head_dim)
         v = v.view(b, 1, self.num_heads, self.head_dim).transpose(1, 2)     # (B, heads, 1, head_dim)
 
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale           # (B, heads, N, 1)
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_out = torch.matmul(attn_weights, v)                             # (B, heads, N, head_dim)
+        # Scaled dot-product affinity gating: Q (visual tokens) x K (text conditioning)
+        affinity = torch.sigmoid(torch.matmul(q, k.transpose(-2, -1)) * self.scale)  # (B, heads, N, 1)
+        attn_out = q * (affinity * 2.0) + v * 2.0                                     # (B, heads, N, head_dim)
 
         # Recombine heads
-        attn_out = attn_out.transpose(1, 2).contiguous().view(b, n, self.d_model) # (B, N, 512)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b, n, self.d_model)     # (B, N, 512)
         proj_out = self.w_o(attn_out)
 
         # Residual connection & layer norm
@@ -249,8 +248,15 @@ class SiameseCrossAttentionEngine(nn.Module):
         1. Full forward pass: forward(I_t1, I_t2, e_star)
         2. Fast counter-factual pass: forward_from_features(f_delta_pyramid, e_star) (<150 ms)
     """
-    def __init__(self, in_channels: int = 4, embed_dim: int = 512):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        embed_dim: int = 512,
+        weights_path: Optional[str] = None
+    ):
         super().__init__()
+        self.in_channels = in_channels
+        self.embed_dim = embed_dim
         # Weight-shared Siamese encoder
         self.encoder = ResNet34Encoder(in_channels=in_channels)
 
@@ -265,6 +271,30 @@ class SiameseCrossAttentionEngine(nn.Module):
 
         # Dense UNet++ decoder
         self.decoder = UNetPlusPlusDecoder()
+
+        # Automatic trained weights loading
+        import os
+        candidate_paths = [
+            weights_path,
+            os.path.join("storage", "models", "siamese_trained_model.pt"),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "storage", "models", "siamese_trained_model.pt"),
+            os.path.join("..", "storage", "models", "siamese_trained_model.pt")
+        ]
+        self.weights_path = None
+        self.is_trained = False
+        for p in candidate_paths:
+            if p and os.path.isfile(p):
+                self.weights_path = p
+                break
+
+        if self.weights_path and os.path.isfile(self.weights_path):
+            try:
+                ckpt = torch.load(self.weights_path, map_location="cpu")
+                state = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+                self.load_state_dict(state, strict=False)
+                self.is_trained = True
+            except Exception:
+                pass
 
     def extract_feature_pyramids(
         self,

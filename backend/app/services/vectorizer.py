@@ -12,7 +12,13 @@ import uuid
 from typing import List, Dict, Any, Union, Optional
 import numpy as np
 import cv2
-import rasterio.features
+try:
+    import rasterio.features
+    HAS_RASTERIO = True
+except Exception:
+    rasterio = None
+    HAS_RASTERIO = False
+
 import affine
 import torch
 
@@ -111,14 +117,34 @@ def extract_vector_features(
         where=counts > 0
     )
 
-    # 3. Vector extraction via rasterio.features.shapes over labeled raster
-    # connectivity=8 matches standard military geospatial topology
-    raw_shapes = rasterio.features.shapes(
-        labels.astype(np.int32),
-        mask=(labels > 0),
-        connectivity=8,
-        transform=transform
-    )
+    # 3. Vector extraction via rasterio or OpenCV contour fallback over labeled raster
+    if HAS_RASTERIO and rasterio is not None:
+        raw_shapes = rasterio.features.shapes(
+            labels.astype(np.int32),
+            mask=(labels > 0),
+            connectivity=8,
+            transform=transform
+        )
+    else:
+        # High-performance OpenCV contour fallback when rasterio binary DLL is blocked
+        raw_shapes = []
+        for label_id in range(1, num_labels):
+            mask = (labels == label_id).astype(np.uint8)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if len(cnt) < 3:
+                    continue
+                ring = []
+                for pt in cnt:
+                    col, row = float(pt[0][0]), float(pt[0][1])
+                    lon, lat = transform * (col, row)
+                    ring.append([lon, lat])
+                if ring[0] != ring[-1]:
+                    ring.append(ring[0])
+                raw_shapes.append(({
+                    "type": "Polygon",
+                    "coordinates": [ring]
+                }, float(label_id)))
 
     detected_features: List[DetectedPolygonFeature] = []
 

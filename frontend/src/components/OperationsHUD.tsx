@@ -40,8 +40,8 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
   eccScore,
   onExportDossier,
   isExporting = false,
-  t1FileName = 'sentinel_airbase_t1.png',
-  t2FileName = 'sentinel_airbase_t2.png',
+  t1FileName = '',
+  t2FileName = '',
   t1ImagePreview,
   t2ImagePreview,
   onUploadT1,
@@ -51,6 +51,8 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
 }) => {
   const fileInputT1Ref = useRef<HTMLInputElement>(null);
   const fileInputT2Ref = useRef<HTMLInputElement>(null);
+  const [isDraggingT1, setIsDraggingT1] = React.useState<boolean>(false);
+  const [isDraggingT2, setIsDraggingT2] = React.useState<boolean>(false);
 
   const handleT1FileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0] && onUploadT1) {
@@ -64,6 +66,22 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
     }
   };
 
+  const handleDropT1 = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingT1(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0] && onUploadT1) {
+      onUploadT1(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleDropT2 = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingT2(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0] && onUploadT2) {
+      onUploadT2(e.dataTransfer.files[0]);
+    }
+  };
+
   return (
     <div className="w-84 flex flex-col gap-3 pointer-events-auto overflow-y-auto max-h-[calc(100vh-140px)] pr-1">
       {/* 1. Altered Ground Surface & Detection Metrics */}
@@ -73,10 +91,17 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
             <Layers className="w-4 h-4 text-tactical-cyan" />
             <span>OPERATIONAL ASSESSMENT</span>
           </div>
-          <span className="telemetry-text text-[11px] text-tactical-emerald font-bold flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-tactical-emerald animate-pulse" />
-            <span>CONFIRMED DELTA</span>
-          </span>
+          {features.length > 0 ? (
+            <span className="telemetry-text text-[11px] text-tactical-emerald font-bold flex items-center space-x-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-tactical-emerald animate-pulse" />
+              <span>CONFIRMED DELTA</span>
+            </span>
+          ) : (
+            <span className="telemetry-text text-[11px] text-tactical-amber font-bold flex items-center space-x-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-tactical-amber animate-pulse" />
+              <span>STANDBY / AWAITING INGEST</span>
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-2.5">
@@ -151,17 +176,26 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
         {/* Dual Upload Dropzones */}
         <div className="space-y-2">
           {/* Pre-Event Image (t1) */}
-          <div className="bg-void/80 p-2 rounded border border-border-subtle hover:border-tactical-cyan/50 transition-all">
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDraggingT1(true); }}
+            onDragLeave={() => setIsDraggingT1(false)}
+            onDrop={handleDropT1}
+            className={`p-2 rounded border transition-all ${
+              isDraggingT1
+                ? 'bg-tactical-cyan/15 border-tactical-cyan shadow-[0_0_15px_#06b6d480]'
+                : 'bg-void/80 border-border-subtle hover:border-tactical-cyan/50'
+            }`}
+          >
             <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] font-extrabold text-tactical-cyan telemetry-text uppercase">
-                1. PRE-EVENT IMAGE (t1 Baseline)
+              <span className="text-[10px] font-extrabold text-tactical-cyan telemetry-text uppercase flex items-center space-x-1">
+                <span>1. PRE-EVENT (t1 Baseline)</span>
               </span>
               <button
                 type="button"
                 onClick={() => fileInputT1Ref.current?.click()}
-                className="text-[10px] text-tactical-cyan hover:underline flex items-center space-x-1"
+                className="text-[10px] text-tactical-cyan hover:underline font-bold"
               >
-                <span>Upload</span>
+                {t1FileName ? 'Replace' : 'Browse'}
               </button>
             </div>
             <div
@@ -182,11 +216,16 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
                 </div>
               )}
               <div className="overflow-hidden flex-1">
-                <div className="text-[11px] font-medium text-text-primary truncate">{t1FileName}</div>
-                <div className="text-[10px] text-text-muted telemetry-text">Click to choose image (PNG, JPG, TIFF)</div>
+                <div className="text-[11px] font-medium text-text-primary truncate">
+                  {t1FileName || 'Drop T1 Image Here'}
+                </div>
+                <div className="text-[10px] text-text-muted telemetry-text">
+                  {isDraggingT1 ? 'Release to upload' : 'PNG, JPG, TIFF'}
+                </div>
               </div>
             </div>
             <input
+              id="t1-file-input"
               type="file"
               ref={fileInputT1Ref}
               onChange={handleT1FileChange}
@@ -196,17 +235,26 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
           </div>
 
           {/* Post-Event Image (t2) */}
-          <div className="bg-void/80 p-2 rounded border border-border-subtle hover:border-tactical-crimson/50 transition-all">
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDraggingT2(true); }}
+            onDragLeave={() => setIsDraggingT2(false)}
+            onDrop={handleDropT2}
+            className={`p-2 rounded border transition-all ${
+              isDraggingT2
+                ? 'bg-tactical-crimson/15 border-tactical-crimson shadow-[0_0_15px_#ef444480]'
+                : 'bg-void/80 border-border-subtle hover:border-tactical-crimson/50'
+            }`}
+          >
             <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] font-extrabold text-tactical-crimson telemetry-text uppercase">
-                2. POST-EVENT IMAGE (t2 Target)
+              <span className="text-[10px] font-extrabold text-tactical-crimson telemetry-text uppercase flex items-center space-x-1">
+                <span>2. POST-EVENT (t2 Target)</span>
               </span>
               <button
                 type="button"
                 onClick={() => fileInputT2Ref.current?.click()}
-                className="text-[10px] text-tactical-crimson hover:underline flex items-center space-x-1"
+                className="text-[10px] text-tactical-crimson hover:underline font-bold"
               >
-                <span>Upload</span>
+                {t2FileName ? 'Replace' : 'Browse'}
               </button>
             </div>
             <div
@@ -227,48 +275,22 @@ export const OperationsHUD: React.FC<OperationsHUDProps> = ({
                 </div>
               )}
               <div className="overflow-hidden flex-1">
-                <div className="text-[11px] font-medium text-text-primary truncate">{t2FileName}</div>
-                <div className="text-[10px] text-text-muted telemetry-text">Click to choose image (PNG, JPG, TIFF)</div>
+                <div className="text-[11px] font-medium text-text-primary truncate">
+                  {t2FileName || 'Drop T2 Image Here'}
+                </div>
+                <div className="text-[10px] text-text-muted telemetry-text">
+                  {isDraggingT2 ? 'Release to upload' : 'PNG, JPG, TIFF'}
+                </div>
               </div>
             </div>
             <input
+              id="t2-file-input"
               type="file"
               ref={fileInputT2Ref}
               onChange={handleT2FileChange}
               accept="image/*,.tif,.tiff"
               className="hidden"
             />
-          </div>
-        </div>
-
-        {/* Pre-packaged Satellite Imagery Pairs */}
-        <div className="mt-3 pt-2.5 border-t border-border-subtle/80">
-          <div className="text-[10px] text-text-muted font-bold uppercase tracking-wider mb-1.5">
-            OR LOAD REAL SATELLITE PRESET:
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              type="button"
-              onClick={() => onSelectPreset && onSelectPreset('airbase')}
-              className={`p-1.5 rounded text-[10px] font-bold text-left transition-all border ${
-                activePreset === 'airbase'
-                  ? 'bg-tactical-cyan/20 border-tactical-cyan text-text-mono-cyan'
-                  : 'bg-void/80 hover:bg-panel border-border-subtle text-text-secondary'
-              }`}
-            >
-              🛫 Airbase Expansion
-            </button>
-            <button
-              type="button"
-              onClick={() => onSelectPreset && onSelectPreset('sentinel2')}
-              className={`p-1.5 rounded text-[10px] font-bold text-left transition-all border ${
-                activePreset === 'sentinel2'
-                  ? 'bg-tactical-cyan/20 border-tactical-cyan text-text-mono-cyan'
-                  : 'bg-void/80 hover:bg-panel border-border-subtle text-text-secondary'
-              }`}
-            >
-              🛰️ Sentinel-2 10m Tile
-            </button>
           </div>
         </div>
       </div>

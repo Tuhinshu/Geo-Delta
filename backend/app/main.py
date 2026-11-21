@@ -34,10 +34,11 @@ app = FastAPI(
     redoc_url=f"{settings.API_V1_PREFIX}/redoc"
 )
 
-# Configure CORS for local Next.js client
+# Configure CORS for local Next.js client across any localhost/127.0.0.1 port
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

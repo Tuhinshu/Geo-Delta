@@ -115,3 +115,47 @@ def test_counterfactual_endpoint_flow():
     bad_res = client.post("/api/v1/inference/counterfactual", json=bad_payload)
     assert bad_res.status_code == 404
 
+
+def test_submit_analysis_upload_multipart():
+    """
+    Tests direct multipart image upload inference with trained Siamese Cross-Attention model.
+    """
+    import io
+    from PIL import Image
+
+    # Create dummy PNG image bytes
+    img1 = Image.new("RGB", (128, 128), color=(140, 130, 110))
+    img2 = Image.new("RGB", (128, 128), color=(140, 130, 110))
+    # Draw a change on img2
+    for x in range(40, 90):
+        for y in range(40, 60):
+            img2.putpixel((x, y), (50, 50, 50))
+
+    b1 = io.BytesIO()
+    img1.save(b1, format="PNG")
+    b1.seek(0)
+
+    b2 = io.BytesIO()
+    img2.save(b2, format="PNG")
+    b2.seek(0)
+
+    files = {
+        "file_t1": ("t1.png", b1.getvalue(), "image/png"),
+        "file_t2": ("t2.png", b2.getvalue(), "image/png")
+    }
+    data = {
+        "query_text": "Identify newly paved runway extension",
+        "confidence_threshold": "0.35"
+    }
+
+    res = client.post("/api/v1/inference/analyze-upload", files=files, data=data)
+    assert res.status_code == 200
+    res_data = res.json()
+
+    assert res_data["status"] == "COMPLETED"
+    assert "features" in res_data
+    assert "heatmap_overlay_base64" in res_data
+    assert res_data["heatmap_overlay_base64"].startswith("data:image/png;base64,")
+    assert "metrics" in res_data
+    assert res_data["metrics"]["is_trained_model"] is True
+

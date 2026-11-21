@@ -13,11 +13,18 @@ import os
 import math
 import hashlib
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 import numpy as np
-import rasterio
-from rasterio.windows import from_bounds, Window, transform as window_transform
-from rasterio.warp import transform_bounds
+
+try:
+    import rasterio
+    from rasterio.windows import from_bounds, Window, transform as window_transform
+    from rasterio.warp import transform_bounds
+    HAS_RASTERIO = True
+except Exception:
+    rasterio = None
+    HAS_RASTERIO = False
+
 import affine
 
 from app.core.schemas import BoundingBoxAOI
@@ -48,7 +55,7 @@ class COGStreamer:
         self.default_bands = list(default_bands)
 
     @staticmethod
-    def _calculate_gsd(src: rasterio.DatasetReader, mean_lat: float = 0.0) -> float:
+    def _calculate_gsd(src: Any, mean_lat: float = 0.0) -> float:
         """
         Calculates the native Ground Sample Distance (GSD) in meters.
         """
@@ -87,6 +94,12 @@ class COGStreamer:
         Raises:
             RasterIngestionException: If the URI is invalid, unreadable, or doesn't intersect AOI.
         """
+        if not HAS_RASTERIO or rasterio is None:
+            raise RasterIngestionException(
+                raster_uri,
+                "Cloud-Optimized GeoTIFF streaming requires rasterio (unavailable under local Windows App Control policy). Please use direct drag & drop upload inference."
+            )
+
         read_bands = list(bands) if bands is not None else self.default_bands
 
         try:
